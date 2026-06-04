@@ -104,3 +104,62 @@ English: A power capsule has been added to the top-right header to show battery 
 中文：NAS 探测和 Agent 设计都以只读为原则。Agent 通过 nsenter 借道宿主机 namespace 读取 `/proc`、`/sys`、挂载点、SMART、mdraid、Docker socket 等信息，不修改 NAS 文件、服务或配置。不挂载任何主机卷。
 
 English: The NAS probe and Agent design are read-only by default. The Agent uses nsenter to read `/proc`, `/sys`, mount points, SMART, mdraid, and Docker socket data from the host namespace without modifying NAS files, services, or configuration. No host volumes are mounted.
+
+## Branches / 分支说明
+
+中文：本仓库 main 分支与原作者 [Panda-995/NASflow](https://github.com/Panda-995/NASflow) 保持同步；以下分支为本仓库 (`zhj2032/NASflow`) 自行维护的功能分支，仅作为个人改动存档，**不**回推给上游、不打算合并到 main。如需使用请按下方说明自取。
+
+English: This repository's `main` branch stays in sync with the upstream [Panda-995/NASflow](https://github.com/Panda-995/NASflow). The branches below are self-maintained feature branches under `zhj2032/NASflow`. They are kept open as a personal change log, **not** pushed upstream and **not** intended to be merged into `main`. Pull them directly if you want to use them.
+
+### `feature/qnap-backend` — QNAP QTS / QuTS hero / QuTScloud storage support
+
+> PR: https://github.com/zhj2032/NASflow/pull/1 (open, kept open for reference)
+
+中文：原版 `agent/app/collectors/storage.py` 强绑极空间路径（`/zspace/zsrp`、`/zspace/applications/logs`、`/data_*`、`/zdocker` overlay filter）和 `mdadm /dev/md0 md1` RAID 探测，在 QNAP 上全部失效——QNAP 的存储池挂载在 `/share/CACHEDEV*_DATA`（QTS 用 LVM 缓存卷、QuTS hero 用 ZFS），RAID 状态由 `lvs` 或 `zpool list` 报告。本分支把 `collect()` 拆成 backend 自动检测 + 路由，让同一镜像可在多厂商 NAS 上跑。
+
+**改动**:
+
+- `agent/app/collectors/storage.py` — refactored
+  - 新增 `_resolve_backend()`，按 `NAS_AGENT_BACKEND` 环境变量 → `/etc/config/qpkg.conf` 探测 → `df` 扫 `zspace/zdocker` → `generic` 回退的顺序选择 backend
+  - 原始 `collect()` 主体重命名为 `_collect_zspace()`，**极空间行为零破坏**（字节级保持）
+  - `collect()` 现在按解析结果分发到对应后端
+
+- `agent/app/collectors/_qnap.py` (新, 200 行)
+  - `is_qnap()` —— 探测 `/etc/config/qpkg.conf`、`/etc/default_config/uLinux.conf`、`/etc/qsync.conf`、`/etc/model.conf`
+  - `list_share_mounts()` —— 枚举 `/share/CACHEDEV*_DATA` 和 `/share/MD0_DATA`，按 LVM `cachedev<N>` ID 去重
+  - `read_pool_layout()` —— 读 LVM cachedev 状态（`lvs`）和 ZFS zpool 健康（`zpool list`），让每个池携带 `raid_type` + `raid_status`
+  - `is_storage_degraded()` —— 汇总池级降级/危急状态，老机器用 `/proc/mdstat` 兜底
+
+**Backend 矩阵**:
+
+| Backend | 探测方式 / Detection | 存储布局 / Layout | RAID 信息 / RAID |
+| --- | --- | --- | --- |
+| `zspace` (default) | `df` 扫 `/zspace` / `/zdocker` | `df` + `/data_*` 过滤 | `mdadm /dev/md0 md1` |
+| `qnap` (new) | `/etc/config/qpkg.conf` | `/share/CACHEDEV*_DATA` | `lvs` (LVM) 或 `zpool list` (ZFS) |
+| `generic` | none | `/mnt/*` `/data/*` `/srv/*` 正则 | unknown |
+
+**在 QNAP Container Station 上启用**:
+
+```bash
+# 方法 1: 环境变量强制（推荐用于 QNAP）
+NAS_AGENT_BACKEND=qnap
+
+# 方法 2: 自动检测（默认行为，无需设置）
+# 容器会以 host network / privileged 跑，agent 会通过 /etc/config/qpkg.conf 自动识别
+```
+
+**测试覆盖**: 7/7 mock 测试通过，`+225 / -51` 跨 2 文件，API 契约零变化。
+
+**回滚到 main（即不要 QNAP backend）**:
+```bash
+git checkout main
+```
+或在自己的分支上把这两个文件替换回 `main` 版本：
+```bash
+git checkout main -- agent/app/collectors/storage.py
+rm -f agent/app/collectors/_qnap.py
+```
+
+English: The original `agent/app/collectors/storage.py` is hard-coded to ZSpace paths (`/zspace/zsrp`, `/zspace/applications/logs`, `/data_*`, the `/zdocker` overlay filter) and `mdadm /dev/md0 /dev/md1` for RAID. None of that works on a QNAP, where storage pools mount under `/share/CACHEDEV*_DATA` (LVM-cached ext4 on QTS, ZFS on QuTS hero) and RAID state is reported by `lvs` or `zpool list`. This branch turns `collect()` into a backend dispatcher so the same image runs on multiple NAS vendors.
+
+See the PR body for the full description: https://github.com/zhj2032/NASflow/pull/1
